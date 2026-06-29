@@ -6,13 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
-import { patterns, type ExerciseType, type Pattern, type PatternStatus } from "@/data/patterns";
+import { patterns, type ExerciseType, type PatternStatus } from "@/data/patterns";
 import {
   buildExercise,
   chooseReviewPattern,
   createInitialProgress,
   deriveStatus,
-  isAnswerCorrect,
   nextActivePattern,
   type Exercise,
   type PatternProgress,
@@ -105,6 +104,7 @@ function App() {
   const [state, setState] = useState<SessionState>(() => loadState());
   const [answer, setAnswer] = useState("");
   const [selectedChoice, setSelectedChoice] = useState<string | null>(null);
+  const [isEvaluating, setIsEvaluating] = useState(false);
   const [feedback, setFeedback] = useState<{
     visible: boolean;
     matched: boolean;
@@ -115,6 +115,9 @@ function App() {
     examples: string[];
     commonMistake: string;
     label: string;
+    confidence: number;
+    source: string;
+    error?: string;
   }>({
     visible: false,
     matched: true,
@@ -125,6 +128,8 @@ function App() {
     examples: [],
     commonMistake: "",
     label: "",
+    confidence: 0,
+    source: "local",
   });
   const [stepComplete, setStepComplete] = useState(false);
 
@@ -180,50 +185,122 @@ function App() {
     });
   }
 
-  function evaluateCurrentAnswer(submitted: string, selected?: string | null) {
+  async function evaluateCurrentAnswer(submitted: string, selected?: string | null) {
     const exercise = state.currentExercise;
-    const matched =
-      exercise.type === "recognition"
-        ? selected === exercise.acceptedAnswers[0]
-        : isAnswerCorrect(submitted, exercise.acceptedAnswers);
-
     const sourcePattern = patterns[getPatternIndex(exercise.patternId)] ?? activePattern;
-    const progress = state.progress[sourcePattern.id];
-    const nextProgress: PatternProgress = {
-      correctCount: progress.correctCount + (matched ? 1 : 0),
-      mistakeCount: progress.mistakeCount + (matched ? 0 : 1),
-      reviewScore: Math.max(0, progress.reviewScore + (matched ? -1 : 2)),
-      status: progress.status,
-    };
 
-    nextProgress.status = deriveStatus(nextProgress);
+    setIsEvaluating(true);
 
-    const feedbackCommonMistake = sourcePattern.commonMistakes[0] ?? "Literal translation from the native language.";
+    try {
+      const response = await fetch("/api/check-answer", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          answer: submitted,
+          selectedChoice: selected ?? null,
+          exercise: {
+            type: exercise.type,
+            prompt: exercise.prompt,
+          },
+          pattern: sourcePattern,
+        }),
+      });
 
-    setState((current) => ({
-      ...current,
-      progress: {
-        ...current.progress,
-        [sourcePattern.id]: nextProgress,
-      },
-    }));
+      if (!response.ok) {
+        throw new Error(`Check request failed with ${response.status}`);
+      }
 
-    setFeedback({
-      visible: true,
-      matched,
-      correctAnswer:
-        exercise.type === "recognition"
-          ? sourcePattern.prompts.recognition.answer
-          : sourcePattern.correctEnglish,
-      whyUnnatural: sourcePattern.description,
-      nativeThinking: sourcePattern.nativeThinking,
-      patternLine: sourcePattern.title,
-      examples: sourcePattern.examples.slice(0, 4),
-      commonMistake: feedbackCommonMistake,
-      label: matched ? "Pattern matched" : "Literal translation detected",
-    });
+      const result = (await response.json()) as {
+        source?: string;
+        matched?: boolean;
+        confidence?: number;
+        correctedAnswer?: string;
+        reasonWhyUnnatural?: string;
+        nativeSpeakerThinking?: string;
+        patternSummary?: string;
+        moreExamples?: string[];
+        commonMistake?: string;
+        label?: string;
+        error?: string;
+      };
 
-    setStepComplete(true);
+      const matched = Boolean(result.matched);
+      const progress = state.progress[sourcePattern.id];
+      const nextProgress: PatternProgress = {
+        correctCount: progress.correctCount + (matched ? 1 : 0),
+        mistakeCount: progress.mistakeCount + (matched ? 0 : 1),
+        reviewScore: Math.max(0, progress.reviewScore + (matched ? -1 : 2)),
+        status: progress.status,
+      };
+
+      nextProgress.status = deriveStatus(nextProgress);
+
+      setState((current) => ({
+        ...current,
+        progress: {
+          ...current.progress,
+          [sourcePattern.id]: nextProgress,
+        },
+      }));
+
+      setFeedback({
+        visible: true,
+        matched,
+        correctAnswer: result.correctedAnswer || sourcePattern.correctEnglish,
+        whyUnnatural: result.reasonWhyUnnatural || sourcePattern.description,
+        nativeThinking: result.nativeSpeakerThinking || sourcePattern.nativeThinking,
+        patternLine: result.patternSummary || sourcePattern.title,
+        examples: (result.moreExamples && result.moreExamples.length > 0 ? result.moreExamples : sourcePattern.examples).slice(0, 4),
+        commonMistake: result.commonMistake || sourcePattern.commonMistakes[0] || "Literal translation from the native language.",
+        label: result.label || (matched ? "Pattern matched" : "Literal translation detected"),
+        confidence: typeof result.confidence === "number" ? result.confidence : 0.5,
+        source: result.source || "deepseek",
+        error: result.error,
+      });
+
+      setStepComplete(true);
+    } catch (error) {
+      const progress = state.progress[sourcePattern.id];
+      const nextProgress: PatternProgress = {
+        correctCount: progress.correctCount,
+        mistakeCount: progress.mistakeCount + 1,
+        reviewScore: Math.max(0, progress.reviewScore + 1),
+        status: deriveStatus({
+          ...progress,
+          mistakeCount: progress.mistakeCount + 1,
+          reviewScore: Math.max(0, progress.reviewScore + 1),
+        }),
+      };
+
+      setState((current) => ({
+        ...current,
+        progress: {
+          ...current.progress,
+          [sourcePattern.id]: nextProgress,
+        },
+      }));
+
+      setFeedback({
+        visible: true,
+        matched: false,
+        correctAnswer: sourcePattern.correctEnglish,
+        whyUnnatural: sourcePattern.description,
+        nativeThinking: sourcePattern.nativeThinking,
+        patternLine: sourcePattern.title,
+        examples: sourcePattern.examples.slice(0, 4),
+        commonMistake: sourcePattern.commonMistakes[0] || "Literal translation from the native language.",
+        label: "API error fallback",
+        confidence: 0,
+        source: "fallback",
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+
+      setStepComplete(true);
+    } finally {
+      setIsEvaluating(false);
+    }
   }
 
   function revealAnswer() {
@@ -243,6 +320,8 @@ function App() {
       examples: sourcePattern.examples.slice(0, 4),
       commonMistake: sourcePattern.commonMistakes[0] ?? "Literal translation from the native language.",
       label: "Reference answer",
+      confidence: 0,
+      source: "manual",
     });
 
     setStepComplete(true);
@@ -251,11 +330,11 @@ function App() {
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (state.currentExercise.type === "recognition") {
-      evaluateCurrentAnswer(selectedChoice ?? "", selectedChoice);
+      void evaluateCurrentAnswer(selectedChoice ?? "", selectedChoice);
       return;
     }
 
-    evaluateCurrentAnswer(answer);
+    void evaluateCurrentAnswer(answer);
   }
 
   function handleReset() {
@@ -425,10 +504,11 @@ function App() {
                       type="submit"
                       className="rounded-full px-5"
                       disabled={
-                        state.currentExercise.type === "recognition" ? !selectedChoice : !answer.trim()
+                        isEvaluating ||
+                        (state.currentExercise.type === "recognition" ? !selectedChoice : !answer.trim())
                       }
                     >
-                      Check answer
+                      {isEvaluating ? "Checking..." : "Check answer"}
                     </Button>
                     <Button
                       type="button"
@@ -448,7 +528,7 @@ function App() {
                         {feedback.label}
                       </Badge>
                       <span className="text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-                        {feedback.patternLine}
+                        {feedback.patternLine} · {feedback.source}
                       </span>
                     </div>
 
@@ -483,6 +563,13 @@ function App() {
 
                       <div>
                         <div className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+                          Confidence
+                        </div>
+                        <p className="mt-2 text-base leading-7">{Math.round(feedback.confidence * 100)}%</p>
+                      </div>
+
+                      <div>
+                        <div className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
                           More examples
                         </div>
                         <ul className="mt-2 grid gap-2 pl-5 text-base leading-7">
@@ -500,6 +587,12 @@ function App() {
                         </div>
                         <p className="mt-2 text-base leading-7">{feedback.commonMistake}</p>
                       </div>
+
+                      {feedback.error ? (
+                        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
+                          Fallback note: {feedback.error}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 ) : (
