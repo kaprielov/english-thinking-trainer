@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 42 36% 96%;
+    --foreground: 24 18% 16%;
+    --card: 40 34% 98%;
+    --card-foreground: 24 18% 16%;
+    --popover: 40 34% 98%;
+    --popover-foreground: 24 18% 16%;
+    --primary: 17 55% 36%;
+    --primary-foreground: 40 35% 98%;
+    --secondary: 38 24% 90%;
+    --secondary-foreground: 24 18% 16%;
+    --muted: 36 20% 92%;
+    --muted-foreground: 24 10% 42%;
+    --accent: 30 42% 87%;
+    --accent-foreground: 24 18% 16%;
+    --destructive: 0 72% 54%;
+    --destructive-foreground: 40 35% 98%;
+    --border: 28 18% 82%;
+    --input: 28 18% 82%;
+    --ring: 18 55% 36%;
+    --radius: 1.2rem;
+    --font-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+    --font-sans: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    background:
+      radial-gradient(circle at top left, hsl(18 55% 36% / 0.12), transparent 32%),
+      radial-gradient(circle at bottom right, hsl(24 26% 18% / 0.08), transparent 28%),
+      linear-gradient(180deg, hsl(42 36% 97%), hsl(40 30% 93%));
+  }
+}
+
+@layer utilities {
+  .paper-grid {
+    background-image:
+      linear-gradient(hsl(28 15% 78% / 0.24) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(28 15% 78% / 0.14) 1px, transparent 1px);
+    background-size: 36px 36px;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+}
