@@ -4,6 +4,8 @@ import path from "node:path";
 import process from "node:process";
 import OpenAI from "openai";
 
+import { normalizeAnswer } from "../src/lib/grading.mjs";
+
 function loadEnvFile(filePath) {
   if (!existsSync(filePath)) return;
 
@@ -40,7 +42,7 @@ const client = new OpenAI({
   apiKey: LLMGATEWAY_API_KEY ?? "",
   baseURL: "https://api.llmgateway.io/v1/",
 });
-const MODEL = "deepseek-v4-flash";
+const MODEL = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
 
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
@@ -84,9 +86,11 @@ function normalizeExamples(examples) {
 function fallbackResponse(payload) {
   const pattern = payload.pattern ?? {};
   return {
+    // "ungraded" tells the client the answer could not be judged; it must NOT be
+    // counted as a mistake. The client offers self-assessment instead.
     source: "fallback",
-    matched: false,
-    confidence: 0.25,
+    grade: "ungraded",
+    rubric: null,
     correctedAnswer: pattern.correctEnglish || "",
     reasonWhyUnnatural:
       "The API could not be reached, so the app fell back to the built-in pattern metadata.",
@@ -94,8 +98,25 @@ function fallbackResponse(payload) {
     patternSummary: pattern.title || "",
     moreExamples: normalizeExamples(pattern.examples),
     commonMistake: (pattern.commonMistakes && pattern.commonMistakes[0]) || "",
-    label: "Offline fallback",
   };
+}
+
+// Cache LLM verdicts so repeated submissions of the same answer don't re-hit the
+// gateway. Keyed by exercise type + prompt + normalized answer.
+const verdictCache = new Map();
+const VERDICT_CACHE_LIMIT = 500;
+
+function cacheKey(payload) {
+  const exercise = payload.exercise ?? {};
+  return [exercise.type || "", normalizeAnswer(exercise.prompt || ""), normalizeAnswer(payload.answer || "")].join("|");
+}
+
+function rememberVerdict(key, value) {
+  if (verdictCache.size >= VERDICT_CACHE_LIMIT) {
+    const oldest = verdictCache.keys().next().value;
+    if (oldest !== undefined) verdictCache.delete(oldest);
+  }
+  verdictCache.set(key, value);
 }
 
 async function evaluateAnswer(payload) {
@@ -103,13 +124,17 @@ async function evaluateAnswer(payload) {
     return fallbackResponse(payload);
   }
 
+  const key = cacheKey(payload);
+  const cached = verdictCache.get(key);
+  if (cached) return { ...cached, source: "cache" };
+
   const pattern = payload.pattern ?? {};
   const exercise = payload.exercise ?? {};
   const prompt = [
     "You are an English pattern coach.",
-    "Judge whether the learner's answer is a natural English response for the pattern.",
+    "Judge the learner's answer along three independent dimensions for the given pattern.",
     "Return only strict JSON with keys:",
-    "matched:boolean, confidence:number, correctedAnswer:string, reasonWhyUnnatural:string, nativeSpeakerThinking:string, patternSummary:string, moreExamples:string[], commonMistake:string, label:string",
+    "usesPattern:boolean (does the answer use the target construction), grammatical:boolean, natural:boolean (does it sound like a native speaker), correctedAnswer:string, reasonWhyUnnatural:string, nativeSpeakerThinking:string, moreExamples:string[], commonMistake:string",
     "Do not add markdown, code fences, or extra keys.",
     "",
     `Pattern title: ${pattern.title || ""}`,
@@ -159,18 +184,25 @@ async function evaluateAnswer(payload) {
       const parsed = JSON.parse(stripJsonFence(content));
       const parsedExamples = Array.isArray(parsed.moreExamples) ? parsed.moreExamples : pattern.examples;
 
-      return {
+      const result = {
         source: "llmgateway",
-        matched: Boolean(parsed.matched),
-        confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.5,
+        // Advisory rubric — the client folds this into a final grade and drives
+        // progress primarily from its own deterministic checks.
+        rubric: {
+          usesPattern: Boolean(parsed.usesPattern),
+          grammatical: Boolean(parsed.grammatical),
+          natural: Boolean(parsed.natural),
+        },
         correctedAnswer: String(parsed.correctedAnswer || pattern.correctEnglish || ""),
         reasonWhyUnnatural: String(parsed.reasonWhyUnnatural || pattern.description || ""),
         nativeSpeakerThinking: String(parsed.nativeSpeakerThinking || pattern.nativeThinking || ""),
-        patternSummary: String(pattern.title || parsed.patternSummary || ""),
+        patternSummary: String(pattern.title || ""),
         moreExamples: normalizeExamples(parsedExamples),
         commonMistake: String(parsed.commonMistake || (pattern.commonMistakes && pattern.commonMistakes[0]) || ""),
-        label: String(parsed.label || (parsed.matched ? "Pattern matched" : "Literal translation detected")),
       };
+
+      rememberVerdict(key, result);
+      return result;
     } finally {
       clearTimeout(timeoutId);
     }

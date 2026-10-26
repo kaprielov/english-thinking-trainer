@@ -40,19 +40,17 @@ function invoke(server, { method, url, body }) {
   });
 }
 
-test("POST /api/check-answer returns structured evaluation from injected AI client", async () => {
+test("POST /api/check-answer returns a rubric-based evaluation from injected AI client", async () => {
   const server = createApiServer({
     evaluator: async () => ({
       source: "llmgateway",
-      matched: true,
-      confidence: 0.98,
+      rubric: { usesPattern: true, grammatical: true, natural: true },
       correctedAnswer: "How was your trip?",
       reasonWhyUnnatural: "Literal translation does not sound native.",
       nativeSpeakerThinking: "English describes the experience, not the verb 'pass'.",
       patternSummary: "How was + event",
       moreExamples: ["How was your weekend?", "How was the interview?"],
       commonMistake: "How did your trip pass?",
-      label: "Pattern matched",
     }),
   });
 
@@ -77,7 +75,7 @@ test("POST /api/check-answer returns structured evaluation from injected AI clie
   assert.equal(response.statusCode, 200);
   const data = JSON.parse(response.body);
   assert.equal(data.source, "llmgateway");
-  assert.equal(data.matched, true);
+  assert.deepEqual(data.rubric, { usesPattern: true, grammatical: true, natural: true });
   assert.equal(data.correctedAnswer, "How was your trip?");
   assert.equal(data.patternSummary, "How was + event");
   assert.equal(data.moreExamples.length, 2);
@@ -87,15 +85,13 @@ test("GET /api/health responds ok", async () => {
   const server = createApiServer({
     evaluator: async () => ({
       source: "llmgateway",
-      matched: true,
-      confidence: 1,
+      rubric: { usesPattern: true, grammatical: true, natural: true },
       correctedAnswer: "",
       reasonWhyUnnatural: "",
       nativeSpeakerThinking: "",
       patternSummary: "",
       moreExamples: [],
       commonMistake: "",
-      label: "",
     }),
   });
 
